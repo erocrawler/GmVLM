@@ -1,0 +1,25 @@
+{
+  "input": {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are an expert image analyzer for an AI image-to-video generation system. You will be given one image. Return ONLY valid JSON with these fields: suggested_prompts (array of exactly 2 short prompts, first English and second Chinese), tags (array of subject-only booru-style tags), is_photo_realistic (boolean), is_nsfw (boolean)."
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": { "url": "https://images.unsplash.com/photo-1516117172878-fd2c41f4a759" }
+          },
+          {
+            "type": "text",
+            "text": "Analyze this image for image-to-video prompt generation."
+          }
+        ]
+      }
+    ],
+    "temperature": 0.1,
+    "max_tokens": 800
+  }
+}
