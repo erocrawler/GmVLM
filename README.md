@@ -1,41 +1,67 @@
 # GmVLM
 
-A RunPod serverless endpoint for Vision-Language Model inference using [LMDeploy](https://github.com/InternLM/lmdeploy).
+A [Modal.com](https://modal.com) serverless endpoint for Vision-Language Model inference using [LMDeploy](https://github.com/InternLM/lmdeploy).
 
 ## Model
 
-Defaults to `Qwen/Qwen2.5-VL-7B-Instruct`. Override with the `MODEL_PATH` environment variable.
+Defaults to `huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated`. Override by editing the `MODEL_PATH` default in `handler.py` and redeploying.
 
-## Environment Variables
+## Infrastructure
 
-| Variable | Default | Description |
-|---|---|---|
-| `MODEL_PATH` | `Qwen/Qwen2.5-VL-7B-Instruct` | HuggingFace model ID or local path |
-| `MODEL_REVISION` | _(latest)_ | HuggingFace revision/commit |
-| `CACHE_MAX_ENTRY_COUNT` | `0.5` | KV cache fraction (lower on 16GB GPUs) |
-| `HF_TOKEN` | _(none)_ | HuggingFace token for gated models |
-| `HF_HOME` | `/runpod-volume/huggingface-cache/hub` | HF cache dir — mount a Network Volume here |
+- **Runtime**: Modal serverless (GPU: L4)
+- **Container image**: `openmmlab/lmdeploy:v0.12.2-cu12.8`
+- **Model cache**: Modal Volume `gmvlm-hf-cache` mounted at `/hf-cache` — model is downloaded once and reused across cold starts
+- **Cold start**: GPU memory snapshot enabled (`enable_gpu_snapshot`) — after the first boot creates a snapshot, subsequent cold starts restore in seconds instead of ~48s
+
+## Deploy
+
+```bash
+pip install modal
+modal setup        # authenticate once
+modal deploy handler.py
+```
+
+The endpoint URL is printed after deploy:
+```
+https://<your-username>--gmvlm-vlmmodel-handler.modal.run
+```
+
+## Test
+
+```bash
+# Using the test script
+python scripts/test_custom_vl_endpoint.py --image-url "https://example.com/image.jpg"
+
+# FL2V (two images)
+python scripts/test_custom_vl_endpoint.py --image-url "https://..." --last-image-url "https://..."
+
+# Override endpoint URL
+python scripts/test_custom_vl_endpoint.py --image-url "https://..." --endpoint-url "https://..."
+
+# Using modal run (invokes GPU container directly)
+modal run handler.py
+```
+
+Set `MODAL_VL_ENDPOINT_URL` env var to avoid passing `--endpoint-url` every time.
 
 ## Input Format
 
-Accepts OpenAI-compatible chat messages:
+Accepts OpenAI-compatible chat messages (bare, no `input` wrapper):
 
 ```json
 {
-  "input": {
-    "messages": [
-      { "role": "system", "content": "You are a helpful assistant." },
-      {
-        "role": "user",
-        "content": [
-          { "type": "image_url", "image_url": { "url": "https://..." } },
-          { "type": "text", "text": "Describe this image." }
-        ]
-      }
-    ],
-    "temperature": 0.1,
-    "max_tokens": 800
-  }
+  "messages": [
+    { "role": "system", "content": "You are a helpful assistant." },
+    {
+      "role": "user",
+      "content": [
+        { "type": "image_url", "image_url": { "url": "https://..." } },
+        { "type": "text", "text": "Describe this image." }
+      ]
+    }
+  ],
+  "temperature": 0.1,
+  "max_tokens": 800
 }
 ```
 
@@ -43,12 +69,12 @@ Also accepts a simpler format:
 
 ```json
 {
-  "input": {
-    "image_url": "https://...",
-    "prompt": "Describe this image."
-  }
+  "image_url": "https://...",
+  "prompt": "Describe this image."
 }
 ```
+
+The RunPod-style `{"input": {...}}` wrapper is also accepted for backwards compatibility.
 
 ## Output
 
@@ -66,15 +92,24 @@ Returns an OpenAI-compatible response shape:
 }
 ```
 
-## Docker Build
+## Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `MODEL_PATH` | `huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated` | HuggingFace model ID |
+| `CACHE_MAX_ENTRY_COUNT` | `0.5` | KV cache fraction of GPU memory |
+| `HF_HOME` | `/hf-cache` | HF cache dir (Modal Volume) |
+
+## Volume Management
 
 ```bash
-# Runtime model loading via Network Volume (recommended)
-docker build -t gmvlm .
+# List cached models
+modal volume ls gmvlm-hf-cache /hub
 
-# Bake model into image at build time
-docker build \
-  --build-arg MODEL_PATH=Qwen/Qwen2.5-VL-7B-Instruct \
-  --secret id=HF_TOKEN \
-  -t gmvlm .
+# Delete a specific model
+modal volume rm gmvlm-hf-cache /hub/models--org--modelname -r
+
+# Wipe entire cache
+modal volume delete gmvlm-hf-cache
 ```
+

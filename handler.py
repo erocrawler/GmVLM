@@ -1,21 +1,30 @@
 import os
-import runpod
-from lmdeploy import pipeline, TurbomindEngineConfig, GenerationConfig
-from lmdeploy.vl import load_image
+import modal
 
 # ---------------------------------------------------------------------------
-# Startup: load model once, reuse across jobs
+# Modal app & container image
 # ---------------------------------------------------------------------------
-model_path = os.getenv("MODEL_PATH", "Qwen/Qwen2.5-VL-7B-Instruct")
 
-backend_config = TurbomindEngineConfig(
-    session_len=8192,
-    cache_max_entry_count=float(os.getenv("CACHE_MAX_ENTRY_COUNT", "0.5")),
+app = modal.App("gmvlm")
+
+image = (
+    modal.Image.from_registry(
+        "openmmlab/lmdeploy:v0.12.2-cu12.8",
+        add_python="3.11",
+    ).pip_install(
+        "pillow",
+        "huggingface_hub",
+        "hf_transfer",
+    ).env({
+        "HF_HOME": "/hf-cache",
+        "HUGGINGFACE_HUB_CACHE": "/hf-cache",
+        "HF_HUB_ENABLE_HF_TRANSFER": "1",
+    })
 )
 
-print(f"Loading model from {model_path}...")
-pipe = pipeline(model_path, backend_config=backend_config)
-print("Model loaded and ready.")
+# Persistent volume for HuggingFace model cache
+hf_cache_vol = modal.Volume.from_name("gmvlm-hf-cache", create_if_missing=True)
+HF_CACHE_PATH = "/hf-cache"
 
 
 # ---------------------------------------------------------------------------
@@ -37,11 +46,15 @@ def _parse_messages(job_input: dict):
         ]
       }
 
-    Format B – Simple (from the TODO.md draft):
+    Format B – Simple:
       {"image_url": "...", "prompt": "..."}
 
     Returns (prompt_text, images, gen_config).
     """
+    # Lazy imports so this function runs correctly inside the Modal container
+    from lmdeploy import GenerationConfig
+    from lmdeploy.vl import load_image
+
     temperature = float(job_input.get("temperature", 0.1))
     max_tokens = int(job_input.get("max_tokens", 800))
     gen_config = GenerationConfig(temperature=temperature, max_new_tokens=max_tokens)
@@ -71,7 +84,6 @@ def _parse_messages(job_input: dict):
                             if url:
                                 image_urls.append(url)
 
-        # Prepend system text if present
         full_prompt = f"{system_text}\n\n{user_text}".strip() if system_text else user_text
         images = [load_image(u) for u in image_urls]
         return full_prompt, images, gen_config
@@ -84,46 +96,114 @@ def _parse_messages(job_input: dict):
 
 
 # ---------------------------------------------------------------------------
-# Handler
+# Model class — one container, model loaded once, endpoint reused per request
 # ---------------------------------------------------------------------------
 
-def handler(job):
-    job_input = job.get("input", {})
+@app.cls(
+    gpu="L4",
+    image=image,
+    volumes={HF_CACHE_PATH: hf_cache_vol},
+    enable_memory_snapshot=True,
+    experimental_options={"enable_gpu_snapshot": True},
+    scaledown_window=300,
+    timeout=600,
+)
+class VLMModel:
+    @modal.enter(snap=True)
+    def load_model(self):
+        from lmdeploy import pipeline, TurbomindEngineConfig
 
-    try:
-        prompt, images, gen_config = _parse_messages(job_input)
-    except Exception as e:
-        return {"error": f"Failed to parse input: {str(e)}", "type": type(e).__name__}
+        model_path = os.getenv("MODEL_PATH", "GitMylo/nsfwcaption-qwen3-vl-8b-v3-safetensors")
+        backend_config = TurbomindEngineConfig(
+            session_len=8192,
+            cache_max_entry_count=float(os.getenv("CACHE_MAX_ENTRY_COUNT", "0.5")),
+        )
+        print(f"Loading model from {model_path}...")
+        self.pipe = pipeline(model_path, backend_config=backend_config)
+        print("Model loaded. Running warmup pass before snapshot...")
+        # Warmup: ensures CUDA kernels are JIT-compiled before the snapshot is taken,
+        # so cold-start restores don't pay that cost on the first real request.
+        self.pipe("Describe this image briefly.", gen_config=None)
+        print("Warmup done. Ready to snapshot.")
 
-    if not prompt:
-        return {"error": "No prompt text found in input."}
+    @modal.method()
+    def run_inference(self, item: dict) -> dict:
+        # Accept both RunPod-style {"input": {...}} and bare {...}
+        job_input = item.get("input", item)
 
-    try:
-        if images:
-            # Single image: (prompt, image) — multiple images: (prompt, [img1, img2, ...])
-            model_input = (prompt, images[0]) if len(images) == 1 else (prompt, images)
-        else:
-            model_input = prompt
+        try:
+            prompt, images, gen_config = _parse_messages(job_input)
+        except Exception as e:
+            return {"error": f"Failed to parse input: {str(e)}", "type": type(e).__name__}
 
-        response = pipe(model_input, gen_config=gen_config)
-    except Exception as e:
-        return {"error": f"Inference failed: {str(e)}", "type": type(e).__name__}
+        if not prompt:
+            return {"error": "No prompt text found in input."}
 
-    # Return an OpenAI-compatible shape so the existing test client's extract_text() works
-    return {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": response.text,
+        try:
+            if images:
+                # Single image: (prompt, image) — multiple: (prompt, [img1, img2, ...])
+                model_input = (prompt, images[0]) if len(images) == 1 else (prompt, images)
+            else:
+                model_input = prompt
+
+            response = self.pipe(model_input, gen_config=gen_config)
+        except Exception as e:
+            return {"error": f"Inference failed: {str(e)}", "type": type(e).__name__}
+
+        # OpenAI-compatible response shape
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": response.text,
+                    }
                 }
-            }
+            ],
+            "usage": {
+                "prompt_tokens": getattr(response, "input_token_len", None),
+                "completion_tokens": getattr(response, "generate_token_len", None),
+            },
+        }
+
+    @modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
+    def handler(self, item: dict) -> dict:
+        return self.run_inference.local(item)
+
+
+# ---------------------------------------------------------------------------
+# Local entrypoint — modal run handler.py
+# ---------------------------------------------------------------------------
+
+@app.local_entrypoint()
+def main():
+    import json
+
+    test_input = {
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are an expert image analyzer. Return ONLY valid JSON with fields: "
+                    "suggested_prompts (array of 2 short prompts, first English and second Chinese), "
+                    "tags (array of booru-style tags), is_photo_realistic (boolean), is_nsfw (boolean)."
+                ),
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://image.acg.lol/file/2026/03/28/yejiang260328.1.gif"},
+                    },
+                    {"type": "text", "text": "Analyze this image for image-to-video prompt generation."},
+                ],
+            },
         ],
-        "usage": {
-            "prompt_tokens": getattr(response, "input_token_len", None),
-            "completion_tokens": getattr(response, "generate_token_len", None),
-        },
+        "temperature": 0.1,
+        "max_tokens": 800,
     }
 
-
-runpod.serverless.start({"handler": handler})
+    model = VLMModel()
+    result = model.run_inference.remote(test_input)
+    print(json.dumps(result, ensure_ascii=False, indent=2))

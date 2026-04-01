@@ -1,4 +1,4 @@
-runpod
+modal
 requests
 pillow
 huggingface_hub
