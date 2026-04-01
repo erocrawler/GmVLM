@@ -19,6 +19,7 @@ image = (
         "HF_HOME": "/hf-cache",
         "HUGGINGFACE_HUB_CACHE": "/hf-cache",
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
+        "HF_XET_HIGH_PERFORMANCE": "1",
     })
 )
 
@@ -57,7 +58,8 @@ def _parse_messages(job_input: dict):
 
     temperature = float(job_input.get("temperature", 0.1))
     max_tokens = int(job_input.get("max_tokens", 800))
-    gen_config = GenerationConfig(temperature=temperature, max_new_tokens=max_tokens)
+    repetition_penalty = float(job_input.get("repetition_penalty", 1.05))
+    gen_config = GenerationConfig(temperature=temperature, max_new_tokens=max_tokens, repetition_penalty=repetition_penalty)
 
     # --- Format A ---
     if "messages" in job_input:
