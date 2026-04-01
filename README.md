@@ -1,17 +1,18 @@
 # GmVLM
 
-A [Modal.com](https://modal.com) serverless endpoint for Vision-Language Model inference using [LMDeploy](https://github.com/InternLM/lmdeploy).
+A [Modal.com](https://modal.com) serverless endpoint for Vision-Language Model inference using [vLLM](https://github.com/vllm-project/vllm).
 
 ## Model
 
-Defaults to `huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated`. Override by editing the `MODEL_PATH` default in `handler.py` and redeploying.
+Defaults to `GitMylo/nsfwcaption-qwen3-vl-8b-v3-safetensors`. Override with the `MODEL_PATH` env var or by editing the default in `handler.py` and redeploying.
 
 ## Infrastructure
 
 - **Runtime**: Modal serverless (GPU: L4)
-- **Container image**: `openmmlab/lmdeploy:v0.12.2-cu12.8`
+- **Container image**: `vllm/vllm-openai:v0.10.2`
 - **Model cache**: Modal Volume `gmvlm-hf-cache` mounted at `/hf-cache` — model is downloaded once and reused across cold starts
-- **Cold start**: GPU memory snapshot enabled (`enable_gpu_snapshot`) — after the first boot creates a snapshot, subsequent cold starts restore in seconds instead of ~48s
+- **Cold start**: GPU memory snapshot enabled (`enable_gpu_snapshot`) — after the first boot creates a snapshot, subsequent cold starts restore much faster than a full model load
+- **Inference API**: in-process vLLM `LLM.chat`, using OpenAI-compatible multimodal `messages`
 
 ## Deploy
 
@@ -96,8 +97,13 @@ Returns an OpenAI-compatible response shape:
 
 | Variable | Default | Description |
 |---|---|---|
-| `MODEL_PATH` | `huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated` | HuggingFace model ID |
-| `CACHE_MAX_ENTRY_COUNT` | `0.5` | KV cache fraction of GPU memory |
+| `MODEL_PATH` | `GitMylo/nsfwcaption-qwen3-vl-8b-v3-safetensors` | HuggingFace model ID |
+| `MAX_MODEL_LEN` | `4096` | vLLM context length |
+| `MAX_NUM_SEQS` | `2` | Concurrent sequences allowed in the engine |
+| `GPU_MEMORY_UTILIZATION` | `0.9` | Fraction of GPU memory vLLM may reserve |
+| `MAX_IMAGES_PER_PROMPT` | `4` | Max image parts accepted in one request |
+| `MAX_IMAGE_PIXELS` | `1003520` | Upper bound passed to the multimodal processor |
+| `TRUST_REMOTE_CODE` | `0` | Set to `1` for models that require custom HF code |
 | `HF_HOME` | `/hf-cache` | HF cache dir (Modal Volume) |
 
 ## Volume Management
