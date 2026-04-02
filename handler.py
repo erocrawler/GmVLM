@@ -110,6 +110,7 @@ def _parse_messages(job_input: dict):
     scaledown_window=300,
     timeout=600,
 )
+@modal.concurrent(max_inputs=3, target_inputs=2)
 class VLMModel:
     @modal.enter(snap=True)
     def load_model(self):
