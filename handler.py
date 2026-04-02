@@ -107,8 +107,8 @@ def _parse_messages(job_input: dict):
     volumes={HF_CACHE_PATH: hf_cache_vol},
     enable_memory_snapshot=True,
     experimental_options={"enable_gpu_snapshot": True},
-    scaledown_window=300,
-    timeout=600,
+    scaledown_window=30,
+    timeout=300,
 )
 @modal.concurrent(max_inputs=3, target_inputs=2)
 class VLMModel:
